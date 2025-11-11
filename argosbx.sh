@@ -1,159 +1,172 @@
-#!/usr/bin/env sh
-#
-# WireGuard-Go + Argo Tunnel - Nix Environment Configurator & Launcher
-#
-# This script is designed for pure, non-root Nix/NixOS environments.
-# It does NOT install software. It configures and launches processes
-# using the tools you provide in your Nix shell.
-#
-
-# --- 1. 初始化和环境设置 ---
+#!/bin/sh
 export LANG=en_US.UTF-8
-export argo=${argo:-'yes'}
-export ARGO_DOMAIN=${agn:-''}
-export ARGO_AUTH=${agk:-''}
-export name=${name:-''}
-CONFIG_DIR="./wg-argo-config" # All state is stored locally
 
-# --- 2. 函数定义 ---
+# --- 用户需配置的变量 ---
+# 在运行脚本前，必须通过环境变量提供这些值
+# 示例:
+# export ARGO_AUTH="eyJhIjoiNTFhZWVmNTkyMGVhZTE4NzE5NzVkMzdmNTRjODc1ZTYiLCJ0IjoiNzhkNWVmM2EtODVhOS00YWRjLTgwMmQtYzY1NDFjZTE3N2MzIiwicyI6Ik9XRTRaV0V6WVdZdE5UaGxNQzAwT0dFd0xXRXlOekV0WlRKa05URmlabU5rTldJMiJ9"
+# export CLIENT_PUBLIC_KEY="VPkUM1Ida1ID/TDK1rfU7WoBB41AKKwPXvOj7deQDjU="
+# export WG_PORT="51820"
 
-# 卸载/清理功能
-uninstall_script() {
-    echo "--- 开始清理 WireGuard-Go Argo 配置 ---"
-    
-    echo "正在终止所有后台进程..."
-    # Use pkill with a specific pattern to avoid killing unrelated processes
-    pkill -f "${CONFIG_DIR}/wg0.conf"
-    pkill -f "cloudflared.*--url udp://127.0.0.1:51820"
-    pkill -f "cloudflared.*run --token ${ARGO_AUTH}"
+# WireGuard 内部监听的 UDP 端口，默认为 51820
+: "${WG_PORT:=51820}"
+# 检查 Cloudflare 隧道 Token 是否已设置
+: "${ARGO_AUTH:?错误: 环境变量 ARGO_AUTH (Cloudflare 隧道 Token) 未设置。}"
+# 检查 WireGuard 客户端公钥是否已设置
+: "${CLIENT_PUBLIC_KEY:?错误: 环境变量 CLIENT_PUBLIC_KEY (你的客户端公钥) 未设置。}"
 
-    echo "正在删除本地配置目录..."
-    rm -rf "$CONFIG_DIR"
+# --- 脚本主要逻辑 ---
+WORKDIR="$HOME/agsbx"
+echo "工作目录: $WORKDIR"
+mkdir -p "$WORKDIR"
 
-    echo ""
-    echo "✅ 清理完成。"
+# 函数：判断 CPU 架构
+get_arch() {
+  case $(uname -m) in
+    aarch64) cpu=arm64;;
+    x86_64) cpu=amd64;;
+    *) echo "错误: 不支持的 CPU 架构 $(uname -m)." && exit 1;;
+  esac
+  echo "$cpu"
 }
 
-# 检查环境是否准备就绪
-check_environment() {
-    echo "--- 正在检查Nix环境依赖 ---"
-    local missing_pkg=false
-    for pkg in wg wireguard-go cloudflared; do
-        if ! command -v "$pkg" >/dev/null 2>&1; then
-            echo "❌ 错误: 命令 '$pkg' 未找到。"
-            missing_pkg=true
-        fi
-    done
-
-    if [ "$missing_pkg" = true ]; then
-        echo ""
-        echo "请确保您的Nix环境提供了所有必需的包。"
-        echo "例如，使用以下命令启动一个临时的Nix Shell:"
-        echo "nix-shell -p wireguard-go wireguard-tools cloudflared"
-        exit 1
+# 函数：如果二进制文件不存在，则下载它
+download_binary() {
+  local url="$1"
+  local out_path="$2"
+  if [ ! -f "$out_path" ]; then
+    echo "正在下载 $(basename "$out_path")..."
+    # 自动选择 curl 或 wget 进行下载
+    if command -v curl >/dev/null 2>&1; then
+      curl -L -# -o "$out_path" "$url"
+    elif command -v wget >/dev/null 2>&1; then
+      wget -q -O "$out_path" "$url"
+    else
+      echo "错误: 系统中没有 curl 或 wget，无法下载所需工具。"
+      exit 1
     fi
-    echo "✅ 环境依赖检查通过。"
+    chmod +x "$out_path"
+  fi
 }
 
-# 运行服务
-run_services() {
-    echo; echo "--- 正在生成配置并使用 nohup 启动服务 ---"
-    
-    mkdir -p "$CONFIG_DIR"
-    
-    # 终止旧进程
-    uninstall_script >/dev/null 2>&1
-    mkdir -p "$CONFIG_DIR"
-    
-    # 生成密钥和配置
-    wg genkey | tee "$CONFIG_DIR/wg_server_private.key" | wg pubkey > "$CONFIG_DIR/wg_server_public.key"
-    wg genkey | tee "$CONFIG_DIR/wg_client_private.key" | wg pubkey > "$CONFIG_DIR/wg_client_public.key"
-    SERVER_PRIVATE_KEY=$(cat "$CONFIG_DIR/wg_server_private.key")
-    CLIENT_PUBLIC_KEY=$(cat "$CONFIG_DIR/wg_client_public.key")
+# 下载所有必需的工具
+setup_tools() {
+  local arch=$(get_arch)
+  echo "检测到架构: $arch"
+  # 下载 Cloudflared
+  download_binary "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch" "$WORKDIR/cloudflared"
+  # 下载 wireguard-go
+  download_binary "https://github.com/yonggekkk/argosbx/releases/download/argosbx/wireguard-go-linux-$arch" "$WORKDIR/wireguard-go"
+  # 下载 wg 工具用于生成密钥
+  download_binary "https://github.com/yonggekkk/argosbx/releases/download/argosbx/wg-linux-$arch" "$WORKDIR/wg"
+}
 
-    cat > "$CONFIG_DIR/wg0.conf" <<EOF
+# 生成 WireGuard 服务端配置
+generate_wireguard_config() {
+  echo "正在生成 WireGuard 服务端配置..."
+
+  # 如果服务端的密钥不存在，则生成新的
+  if [ ! -f "$WORKDIR/server_private.key" ]; then
+    echo "生成新的服务端密钥对..."
+    "$WORKDIR/wg" genkey > "$WORKDIR/server_private.key"
+    "$WORKDIR/wg" pubkey < "$WORKDIR/server_private.key" > "$WORKDIR/server_public.key"
+  fi
+
+  SERVER_PRIVATE_KEY=$(cat "$WORKDIR/server_private.key")
+  SERVER_PUBLIC_KEY=$(cat "$WORKDIR/server_public.key")
+
+  # 创建 WireGuard 配置文件 wg0.conf
+  cat > "$WORKDIR/wg0.conf" << EOF
 [Interface]
 PrivateKey = ${SERVER_PRIVATE_KEY}
-ListenPort = 51820
+ListenPort = ${WG_PORT}
 
 [Peer]
 PublicKey = ${CLIENT_PUBLIC_KEY}
 AllowedIPs = 10.0.0.2/32
 EOF
-    
-    # 启动 wireguard-go
-    echo "使用 nohup 启动 wireguard-go..."
-    # wireguard-go will create a TUN device named 'wg0' by default
-    nohup wireguard-go -f "$CONFIG_DIR/wg0.conf" > "$CONFIG_DIR/wireguard.log" 2>&1 &
-    sleep 3
 
-    if ! pgrep -f "${CONFIG_DIR}/wg0.conf" >/dev/null; then
-        echo "❌ 错误: wireguard-go 启动失败！"
-        echo "   常见原因: 您的Nix容器没有被授予网络管理权限 (CAP_NET_ADMIN)。"
-        echo "   请检查日志: cat $CONFIG_DIR/wireguard.log"
-        exit 1
-    fi
-    echo "✅ wireguard-go 已在后台启动。"
-    
-    # 启动 Argo 隧道
-    if [ -n "${ARGO_DOMAIN}" ] && [ -n "${ARGO_AUTH}" ]; then
-        argoname='固定'; echo "启动Argo固定隧道..."
-        nohup cloudflared tunnel --no-autoupdate run --token "${ARGO_AUTH}" > "$CONFIG_DIR/argo.log" 2>&1 &
-    else
-        argoname='临时'; echo "启动Argo临时隧道..."
-        nohup cloudflared tunnel --url udp://127.0.0.1:51820 --no-autoupdate > "$CONFIG_DIR/argo.log" 2>&1 &
-    fi
-    
-    echo "正在向Cloudflare申请 $argoname 隧道... 请等待约8秒钟。"
-    sleep 8
-    
-    if [ -n "${ARGO_DOMAIN}" ]; then argodomain=$(echo "$ARGO_DOMAIN"); else argodomain=$(grep -o 'Proxying UDP traffic from .*' "$CONFIG_DIR/argo.log" | sed -n 's/Proxying UDP traffic from \(.*\).trycloudflare.com to .*/\1.trycloudflare.com/p' | head -n 1); fi
-    
-    if [ -n "${argodomain}" ]; then echo "${argodomain}" > "$CONFIG_DIR/argodomain.log"; echo "✅ Argo $argoname 隧道已建立，域名: ${argodomain}"; else echo "❌ 错误: Argo隧道建立失败！请查看日志: cat $CONFIG_DIR/argo.log"; exit 1; fi
+  echo "服务端公钥: ${SERVER_PUBLIC_KEY}"
 }
 
-# 显示客户端配置
+# 停止所有正在运行的相关服务
+stop_services() {
+  echo "正在停止旧的服务进程..."
+  pkill -f "$WORKDIR/wireguard-go"
+  pkill -f "$WORKDIR/cloudflared"
+  sleep 2
+}
+
+# 运行 wireguard-go 和 cloudflared 服务
+run_services() {
+  stop_services
+
+  echo "正在启动 wireguard-go 服务..."
+  # 运行 wireguard-go 进程到后台
+  nohup "$WORKDIR/wireguard-go" "$WORKDIR/wg0.conf" > "$WORKDIR/wg.log" 2>&1 &
+  sleep 3
+
+  # 检查 wireguard-go 是否成功启动
+  if ! pgrep -f "$WORKDIR/wireguard-go" > /dev/null; then
+    echo "错误: wireguard-go 启动失败。请检查日志: $WORKDIR/wg.log"
+    cat "$WORKDIR/wg.log"
+    exit 1
+  fi
+
+  echo "正在启动 Cloudflared Argo 隧道..."
+  # 运行 cloudflared 进程到后台，协议使用 quic 以获得更好的 UDP 性能
+  nohup "$WORKDIR/cloudflared" tunnel --no-autoupdate --edge-ip-version auto --protocol quic run --token "${ARGO_AUTH}" > "$WORKDIR/argo.log" 2>&1 &
+  sleep 8 # 等待隧道建立连接
+
+  # 检查 cloudflared 是否成功启动
+  if ! pgrep -f "$WORKDIR/cloudflared" > /dev/null; then
+    echo "错误: cloudflared 启动失败。请检查日志: $WORKDIR/argo.log"
+    cat "$WORKDIR/argo.log"
+    exit 1
+  fi
+
+  echo "服务启动成功。"
+}
+
+# 显示客户端配置文件
 display_client_config() {
-    echo; echo "--- 生成客户端配置信息 ---";
-    CLIENT_PRIVATE_KEY=$(cat "$CONFIG_DIR/wg_client_private.key")
-    SERVER_PUBLIC_KEY=$(cat "$CONFIG_DIR/wg_server_public.key")
-    argodomain=$(cat "$CONFIG_DIR/argodomain.log")
-    hostname=$(uname -n)
-    
-    echo ""; echo "===================== 客户端配置 ====================="
-    argo_port="2408" # Cloudflare推荐的UDP端口
-    client_config_file="$CONFIG_DIR/${name}wg-argo-${hostname}.conf"
-    
-    cat > "${client_config_file}" <<EOF
-[Interface]
-PrivateKey = ${CLIENT_PRIVATE_KEY}
-Address = 10.0.0.2/32
-DNS = 8.8.8.8, 1.1.1.1
+  SERVER_PUBLIC_KEY=$(cat "$WORKDIR/server_public.key")
 
-[Peer]
-PublicKey = ${SERVER_PUBLIC_KEY}
-# Since we are not running as root, we cannot control all routing.
-# This configures the client to send ONLY traffic destined for the peer's internal network (10.0.0.1) through the tunnel.
-# Change to '0.0.0.0/0, ::/0' if your container's networking setup correctly routes all traffic.
-AllowedIPs = 10.0.0.1/32
+  # 尝试从 Argo 日志中自动获取隧道的 CNAME 主机名
+  TUNNEL_HOSTNAME=$(grep -oE '[a-z0-9-]+\.cfargotunnel\.com' "$WORKDIR/argo.log" | head -n 1)
 
-Endpoint = ${argodomain}:${argo_port}
-PersistentKeepalive = 25
-EOF
-    cat "${client_config_file}"
-    echo "========================================================"
-    echo "✅ 客户端配置文件已保存到: ${client_config_file}"
+  if [ -z "$TUNNEL_HOSTNAME" ]; then
+      echo "未能自动从日志中检测到隧道主机名。"
+      echo "请登录 Cloudflare Zero Trust 仪表板查看你的隧道 CNAME 地址。"
+      echo "它通常是 '你的隧道ID.cfargotunnel.com' 这种格式。"
+      TUNNEL_HOSTNAME="<你的隧道主机名>"
+  fi
+
+  echo
+  echo "--- WireGuard 客户端配置 ---"
+  echo "请将以下内容复制到你的 WireGuard 客户端中:"
+  echo
+  echo "[Interface]"
+  echo "# 客户端私钥"
+  echo "PrivateKey = [请粘贴你的客户端私钥]"
+  echo "# 客户端IP地址"
+  echo "Address = 10.0.0.2/32"
+  echo "DNS = 1.1.1.1, 8.8.8.8"
+  echo
+  echo "[Peer]"
+  echo "# 服务端公钥"
+  echo "PublicKey = ${SERVER_PUBLIC_KEY}"
+  echo "# 允许路由的IP"
+  echo "AllowedIPs = 0.0.0.0/0, ::/0"
+  echo "# Argo 隧道端点地址"
+  echo "Endpoint = ${TUNNEL_HOSTNAME}:${WG_PORT}"
+  echo "# 保持连接"
+  echo "PersistentKeepalive = 25"
+  echo "----------------------------------------"
 }
 
-# --- 3. 主程序逻辑 ---
-
-if [ "$1" = "del" ] || [ "$1" = "uninstall" ]; then
-    uninstall_script; exit 0;
-fi
-
-check_environment
+# --- 主程序执行流程 ---
+setup_tools
+generate_wireguard_config
 run_services
 display_client_config
-
-echo; echo "🚀 配置与启动完成！"
-echo "⚠️ 警告: 所有进程均以 nohup 方式运行，无法开机自启或在崩溃后自动重启。"
