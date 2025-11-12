@@ -17,59 +17,38 @@ echo "工作目录: $WORKDIR"
 
 # 函数：判断 CPU 架构
 get_arch() {
-  # sing-box 使用的架构名称
-  case $(uname -m) in
-    aarch64) cpu=armv8;;
-    x86_64) cpu=amd64;;
-    *) echo "错误: 不支持的 CPU 架构 $(uname -m)." && exit 1;;
-  esac
+  case $(uname -m) in aarch64) cpu=armv8;; x86_64) cpu=amd64;; *) echo "错误: 不支持的 CPU 架构 $(uname -m)." && exit 1;; esac
   echo "$cpu"
 }
 
-# 函数：下载并解压 sing-box (已修复404问题)
+# 函数：下载并解压 sing-box (已更新为获取最新预发布版)
 download_and_extract_singbox() {
-  if [ -f "$WORKDIR/sing-box" ]; then
-    echo "sing-box 已存在，跳过下载和解压。"
-    return
-  fi
+  if [ -f "$WORKDIR/sing-box" ]; then echo "sing-box 已存在，跳过下载。"; return; fi
 
   local arch=$(get_arch)
-  local API_URL="https://api.github.com/repos/SagerNet/sing-box/releases/latest"
+  # --- 关键修改：从 /releases/latest 改为 /releases ---
+  # 这会获取一个包含所有版本（包括预发布版）的列表，最新的在最前面
+  local API_URL="https://api.github.com/repos/SagerNet/sing-box/releases"
   local ARCHIVE_PATH="$WORKDIR/sing-box.tar.gz"
 
-  echo "正在通过 GitHub API 获取最新版 sing-box 的下载链接..."
+  echo "正在通过 GitHub API 获取最新版(含预发布) sing-box 的下载链接..."
   
-  # 通过API获取包含版本号的精确下载链接
-  local DOWNLOAD_URL=$(curl -s "$API_URL" | grep "browser_download_url" | grep "linux-${arch}.tar.gz" | grep -v "pre-release" | cut -d '"' -f 4 | head -n 1)
+  local DOWNLOAD_URL=$(curl -s "$API_URL" | grep "browser_download_url" | grep "linux-${arch}.tar.gz" | cut -d '"' -f 4 | head -n 1)
 
-  if [ -z "$DOWNLOAD_URL" ]; then
-    echo "错误: 未能从 GitHub API 获取到有效的下载链接！"
-    echo "请检查网络或稍后再试。"
-    exit 1
-  fi
+  if [ -z "$DOWNLOAD_URL" ]; then echo "错误: 未能从 GitHub API 获取到有效的下载链接！"; exit 1; fi
 
   echo "获取到下载链接: $DOWNLOAD_URL"
   echo "正在下载最新版 sing-box..."
   curl -L --fail -o "$ARCHIVE_PATH" "$DOWNLOAD_URL"
 
   if [ $? -ne 0 ] || ! gzip -t "$ARCHIVE_PATH" >/dev/null 2>&1; then
-    echo "错误: sing-box 下载失败或压缩包已损坏！"
-    rm -f "$ARCHIVE_PATH"
-    exit 1
+    echo "错误: sing-box 下载失败或压缩包已损坏！"; rm -f "$ARCHIVE_PATH"; exit 1
   fi
   
   echo "下载成功，正在解压..."
   tar -xzf "$ARCHIVE_PATH" -C "$WORKDIR" --strip-components=1
-  if [ $? -ne 0 ]; then
-    echo "错误: 解压 sing-box 失败！"
-    rm -f "$ARCHIVE_PATH"
-    exit 1
-  fi
-  
-  if [ ! -f "$WORKDIR/sing-box" ]; then
-    echo "错误: 解压后未找到 sing-box 可执行文件！"
-    exit 1
-  fi
+  if [ $? -ne 0 ]; then echo "错误: 解压 sing-box 失败！"; rm -f "$ARCHIVE_PATH"; exit 1; fi
+  if [ ! -f "$WORKDIR/sing-box" ]; then echo "错误: 解压后未找到 sing-box 可执行文件！"; exit 1; fi
   
   echo "sing-box 安装成功。"
   rm -f "$ARCHIVE_PATH"
@@ -77,8 +56,7 @@ download_and_extract_singbox() {
 
 # 函数：下载 cloudflared
 download_cloudflared() {
-    local arch_cf
-    case $(uname -m) in aarch64) arch_cf=arm64;; x86_64) arch_cf=amd64;; esac
+    local arch_cf; case $(uname -m) in aarch64) arch_cf=arm64;; x86_64) arch_cf=amd64;; esac
     if [ -f "$WORKDIR/cloudflared" ]; then echo "cloudflared 已存在，跳过下载。"; return; fi
     local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch_cf}"
     echo "正在下载 cloudflared..."
@@ -125,7 +103,7 @@ run_services() {
 # 显示客户端配置
 display_client_config() {
   SERVER_PUBLIC_KEY=$(cat "$WORKDIR/server_public.key")
-  TUNNEL_HOSTNAME=$(grep -oE '[a-z0-9-]+\.cfargotunnel\.com' "$WORKDIR/argo.log" | head -n 1)
+  TUNNEL_HOSTNAME=$(grep -oE '[a-z0.9-]+\.cfargotunnel\.com' "$WORKDIR/argo.log" | head -n 1)
   if [ -z "$TUNNEL_HOSTNAME" ]; then TUNNEL_HOSTNAME="<请从Cloudflare仪表板或argo.log中查找隧道主机名>"; fi
   echo
   echo "--- WireGuard 客户端配置 ---"
