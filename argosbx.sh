@@ -2,9 +2,10 @@
 export LANG=en_US.UTF-8
 
 # --- 用户需配置的变量 ---
+# 在运行前，必须通过环境变量提供这些值
 # 示例:
-export ARGO_AUTH="eyJhIjo...你的...token...7In0="
-export CLIENT_PUBLIC_KEY="bCeh...你的客户端公钥...="
+export ARGO_AUTH="eyJhIjoiNTFhZWVmNTkyMGVhZTE4NzE5NzVkMzdmNTRjODc1ZTYiLCJ0IjoiNzhkNWVmM2EtODVhOS00YWRjLTgwMmQtYzY1NDFjZTE3N2MzIiwicyI6Ik9XRTRaV0V6WVdZdE5UaGxNQzAwT0dFd0xXRXlOekV0WlRKa05URmlabU5rTldJMiJ9"
+export CLIENT_PUBLIC_KEY="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
 
 : "${WG_PORT:=51820}"
 : "${ARGO_AUTH:?错误: 环境变量 ARGO_AUTH (Cloudflare 隧道 Token) 未设置。}"
@@ -16,58 +17,98 @@ echo "工作目录: $WORKDIR"
 
 # 函数：判断 CPU 架构
 get_arch() {
+  # sing-box 使用的架构名称与标准略有不同
   case $(uname -m) in
-    aarch64) cpu=arm64;;
+    aarch64) cpu=armv8;;
     x86_64) cpu=amd64;;
     *) echo "错误: 不支持的 CPU 架构 $(uname -m)." && exit 1;;
   esac
   echo "$cpu"
 }
 
-# 函数：下载 sing-box 并进行验证
-download_singbox() {
-  local out_path="$WORKDIR/sing-box"
-  if [ -f "$out_path" ]; then
-    echo "sing-box 已存在，跳过下载。"
+# 函数：下载并解压 sing-box
+download_and_extract_singbox() {
+  if [ -f "$WORKDIR/sing-box" ]; then
+    echo "sing-box 已存在，跳过下载和解压。"
     return
   fi
 
   local arch=$(get_arch)
-  # 使用官方 GitHub Release 的下载链接，但需要解压，这里为了方便继续用 argosbx 作者提供的直链
-  local url="https://github.com/yonggekkk/argosbx/releases/download/argosbx/sing-box-linux-$arch"
+  # 使用官方的 "latest" 链接自动获取最新版本
+  local LATEST_URL="https://github.com/SagerNet/sing-box/releases/latest/download/sing-box-linux-${arch}.tar.gz"
+  local ARCHIVE_PATH="$WORKDIR/sing-box.tar.gz"
 
-  echo "正在下载 sing-box..."
+  echo "正在从官方链接下载最新版 sing-box..."
   if command -v curl >/dev/null 2>&1; then
-    curl -L --fail -o "$out_path" "$url"
+    curl -L --fail -o "$ARCHIVE_PATH" "$LATEST_URL"
   else
-    wget -q -O "$out_path" "$url"
+    wget -q -O "$ARCHIVE_PATH" "$LATEST_URL"
   fi
 
-  if [ -f "$out_path" ] && head -c 4 "$out_path" | grep -q $'\x7fELF'; then
-    echo "sing-box 下载成功并验证为有效的可执行文件。"
-    chmod +x "$out_path"
-  else
-    echo "错误: sing-box 下载失败或文件格式不正确！"
-    rm -f "$out_path"
+  # 验证下载的压缩包是否有效
+  if [ $? -ne 0 ] || ! gzip -t "$ARCHIVE_PATH" >/dev/null 2>&1; then
+    echo "错误: sing-box 下载失败或压缩包已损坏！"
+    rm -f "$ARCHIVE_PATH"
     exit 1
   fi
+  
+  echo "下载成功，正在解压..."
+  # --strip-components=1 的作用是解压时去掉最外层的文件夹
+  tar -xzf "$ARCHIVE_PATH" -C "$WORKDIR" --strip-components=1
+  if [ $? -ne 0 ]; then
+    echo "错误: 解压 sing-box 失败！"
+    rm -f "$ARCHIVE_PATH"
+    exit 1
+  fi
+  
+  # 验证 sing-box 可执行文件是否存在
+  if [ ! -f "$WORKDIR/sing-box" ]; then
+    echo "错误: 解压后未找到 sing-box 可执行文件！"
+    exit 1
+  fi
+  
+  echo "sing-box 安装成功。"
+  rm -f "$ARCHIVE_PATH" # 删除已解压的压缩包
 }
 
-# 使用 sing-box 生成 WireGuard 服务端配置
-generate_config() {
-  echo "正在生成 WireGuard 服务端配置..."
+# 函数：下载 cloudflared
+download_cloudflared() {
+    local arch_cf
+    case $(uname -m) in
+      aarch64) arch_cf=arm64;;
+      x86_64) arch_cf=amd64;;
+    esac
+    
+    local out_path="$WORKDIR/cloudflared"
+    if [ -f "$out_path" ]; then
+        echo "cloudflared 已存在，跳过下载。"
+        return
+    fi
+    
+    local url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch_cf}"
+    echo "正在下载 cloudflared..."
+    curl -L --fail -o "$out_path" "$url"
+    if [ $? -ne 0 ]; then
+        echo "错误: cloudflared 下载失败！"
+        exit 1
+    fi
+    chmod +x "$out_path"
+    echo "cloudflared 下载成功。"
+}
 
-  # 如果密钥不存在，则使用 sing-box 生成
-  if [ ! -f "$WORKDIR/server_private.key" ]; then
-    key_pair=$("$WORKDIR/sing-box" generate wireguard-keypair)
-    echo "$key_pair" | awk '/private_key/ {print $2}' | tr -d ',"' > "$WORKDIR/server_private.key"
-    echo "$key_pair" | awk '/public_key/ {print $2}' | tr -d ',"' > "$WORKDIR/server_public.key"
-  fi
+# 函数：使用 sing-box 生成配置
+generate_singbox_config() {
+  echo "正在生成 sing-box 配置文件..."
 
-  SERVER_PRIVATE_KEY=$(cat "$WORKDIR/server_private.key")
-  SERVER_PUBLIC_KEY=$(cat "$WORKDIR/server_public.key")
+  # 使用 sing-box 生成密钥对
+  KEY_PAIR=$("$WORKDIR/sing-box" generate wireguard-keypair)
+  SERVER_PRIVATE_KEY=$(echo "$KEY_PAIR" | grep "Private Key" | awk '{print $3}')
+  SERVER_PUBLIC_KEY=$(echo "$KEY_PAIR" | grep "Public Key" | awk '{print $3}')
 
-  # 创建 sing-box 的 JSON 配置文件
+  # 将公钥保存到文件，方便后续读取
+  echo "$SERVER_PUBLIC_KEY" > "$WORKDIR/server_public.key"
+
+  # 创建 config.json 配置文件
   cat > "$WORKDIR/config.json" << EOF
 {
   "log": {
@@ -80,10 +121,15 @@ generate_config() {
       "tag": "wg-in",
       "listen_port": ${WG_PORT},
       "private_key": "${SERVER_PRIVATE_KEY}",
-      "peer_public_key": "${CLIENT_PUBLIC_KEY}",
-      "reserved": [0,0,0],
-      "server_address": "10.0.0.1/24",
-      "peer_address": "10.0.0.2/32"
+      "peers": [
+        {
+          "public_key": "${CLIENT_PUBLIC_KEY}",
+          "allowed_ips": [
+            "10.0.0.2/32"
+          ],
+          "reserved": [0, 0, 0]
+        }
+      ]
     }
   ],
   "outbounds": [
@@ -94,7 +140,7 @@ generate_config() {
   ]
 }
 EOF
-  echo "服务端公钥: ${SERVER_PUBLIC_KEY}"
+  echo "配置文件 config.json 生成完毕。"
 }
 
 # 停止所有正在运行的相关服务
@@ -116,7 +162,6 @@ run_services() {
     cat "$WORKDIR/sing-box.log"
     exit 1
   fi
-
   echo "正在启动 Cloudflared Argo 隧道..."
   nohup "$WORKDIR/cloudflared" tunnel --no-autoupdate --edge-ip-version auto --protocol quic run --token "${ARGO_AUTH}" > "$WORKDIR/argo.log" 2>&1 &
   sleep 8
@@ -135,12 +180,11 @@ display_client_config() {
   if [ -z "$TUNNEL_HOSTNAME" ]; then
       TUNNEL_HOSTNAME="<请从Cloudflare仪表板或argo.log中查找隧道主机名>"
   fi
-
   echo
   echo "--- WireGuard 客户端配置 ---"
   echo "[Interface]"
   echo "PrivateKey = [请粘贴你的客户端私钥]"
-  echo "Address = 10.0.0.2/24"
+  echo "Address = 10.0.0.2/32"
   echo "DNS = 1.1.1.1, 8.8.8.8"
   echo
   echo "[Peer]"
@@ -152,26 +196,13 @@ display_client_config() {
 }
 
 # --- 主程序执行流程 ---
-if [ "$1" = "clean" ]; then
-    echo "正在执行清理..."
-    stop_services
-    rm -rf "$WORKDIR"
-    echo "清理完成。"
-    exit
-fi
-
+# 清理旧环境并重新开始
 stop_services
 rm -rf "$WORKDIR"
 mkdir -p "$WORKDIR"
 
-download_singbox
-# Cloudflared 仍然需要下载
-download_binary() {
-    local url="$1" out_path="$2" binary_name=$(basename "$out_path")
-    if [ ! -f "$out_path" ]; then echo "正在下载 ${binary_name}..."; if command -v curl >/dev/null 2>&1; then curl -L --fail -o "$out_path" "$url"; else wget -q -O "$out_path" "$url"; fi; if [ -f "$out_path" ] && head -c 4 "$out_path" | grep -q $'\x7fELF'; then echo "${binary_name} 下载成功并验证为有效的可执行文件。"; chmod +x "$out_path"; else echo "错误: ${binary_name} 下载失败或文件格式不正确！"; rm -f "$out_path"; exit 1; fi; else echo "${binary_name} 已存在，跳过下载。"; fi
-}
-download_binary "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$(get_arch)" "$WORKDIR/cloudflared"
-
-generate_config
+download_and_extract_singbox
+download_cloudflared
+generate_singbox_config
 run_services
 display_client_config
