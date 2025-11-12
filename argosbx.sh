@@ -3,8 +3,8 @@ export LANG=en_US.UTF-8
 
 # --- 用户需配置的变量 ---
 # 示例:
-# export ARGO_AUTH="eyJhIjo...你的...token...7In0="
-# export CLIENT_PUBLIC_KEY="bCeh...你的客户端公钥...="
+export ARGO_AUTH="eyJhIjoiNTFhZWVmNTkyMGVhZTE4NzE5NzVkMzdmNTRjODc1ZTYiLCJ0IjoiNzhkNWVmM2EtODVhOS00YWRjLTgwMmQtYzY1NDFjZTE3N2MzIiwicyI6Ik9XRTRaV0V6WVdZdE5UaGxNQzAwT0dFd0xXRXlOekV0WlRKa05URmlabU5rTldJMiJ9"
+export CLIENT_PUBLIC_KEY="bmXOC+F1FxEMF9dyiK2H5/1SUtzH0JuVo51h2wPfgyo="
 
 : "${WG_PORT:=51820}"
 : "${ARGO_AUTH:?错误: 环境变量 ARGO_AUTH (Cloudflare 隧道 Token) 未设置。}"
