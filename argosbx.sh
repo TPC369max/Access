@@ -25,35 +25,43 @@ get_arch() {
   echo "$cpu"
 }
 
-# 函数：下载二进制文件并进行验证（已优化）
+# 函数：下载二进制文件并进行验证（最终版：通过尝试执行来验证）
 download_binary() {
   local url="$1"
   local out_path="$2"
   local binary_name=$(basename "$out_path")
 
-  if [ ! -f "$out_path" ]; then
-    echo "正在下载 ${binary_name}..."
-    if command -v curl >/dev/null 2>&1; then
-      curl -L --fail -o "$out_path" "$url"
-    elif command -v wget >/dev/null 2>&1; then
-      wget -q -O "$out_path" "$url"
-    else
-      echo "错误: 系统中没有 curl 或 wget，无法下载所需工具。"
-      exit 1
-    fi
+  if [ -f "$out_path" ]; then
+    echo "${binary_name} 已存在，跳过下载。"
+    return
+  fi
 
-    # --- 新增：下载验证逻辑 ---
-    if [ -f "$out_path" ] && file "$out_path" | grep -q "executable"; then
-      echo "${binary_name} 下载成功并验证为可执行文件。"
-      chmod +x "$out_path"
+  echo "正在下载 ${binary_name}..."
+  if command -v curl >/dev/null 2>&1; then
+    # 使用 -f 选项，如果服务器返回错误（如404），curl会直接失败
+    curl -Lf -o "$out_path" "$url"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -q -O "$out_path" "$url"
+  else
+    echo "错误: 系统中没有 curl 或 wget，无法下载所需工具。"
+    exit 1
+  fi
+
+  # --- 最终验证逻辑：尝试执行 --version ---
+  if [ -f "$out_path" ]; then
+    chmod +x "$out_path"
+    # 尝试执行程序并检查其退出状态码。输出被重定向到/dev/null。
+    if "$out_path" --version >/dev/null 2>&1; then
+      echo "${binary_name} 下载并验证成功。"
     else
-      echo "错误: ${binary_name} 下载失败或下载的文件不是有效的可执行程序！"
-      echo "请检查下载链接或网络连接。"
-      rm -f "$out_path" # 删除错误的下载文件
+      echo "错误: ${binary_name} 下载成功但无法执行！"
+      echo "这可能是因为文件已损坏、架构不匹配，或下载链接已失效。"
+      rm -f "$out_path"
       exit 1
     fi
   else
-    echo "${binary_name} 已存在，跳过下载。"
+    echo "错误: ${binary_name} 下载失败！请检查下载链接或网络连接。"
+    exit 1
   fi
 }
 
@@ -62,6 +70,7 @@ setup_tools() {
   local arch=$(get_arch)
   echo "检测到架构: $arch"
   download_binary "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch" "$WORKDIR/cloudflared"
+  # 注意：wireguard-go 和 wg 没有 --version 参数，我们只检查它们是否存在且可执行
   download_binary "https://github.com/yonggekkk/argosbx/releases/download/argosbx/wireguard-go-linux-$arch" "$WORKDIR/wireguard-go"
   download_binary "https://github.com/yonggekkk/argosbx/releases/download/argosbx/wg-linux-$arch" "$WORKDIR/wg"
 }
@@ -86,7 +95,7 @@ EOF
   echo "服务端公钥: ${SERVER_PUBLIC_KEY}"
 }
 
-# 停止所有正在运行的相关服务
+# 停止服务
 stop_services() {
   echo "正在停止旧的服务进程..."
   pkill -f "$WORKDIR/wireguard-go"
@@ -116,7 +125,7 @@ run_services() {
   echo "服务启动成功。"
 }
 
-# 显示客户端配置文件
+# 显示客户端配置
 display_client_config() {
   SERVER_PUBLIC_KEY=$(cat "$WORKDIR/server_public.key")
   TUNNEL_HOSTNAME=$(grep -oE '[a-z0-9-]+\.cfargotunnel\.com' "$WORKDIR/argo.log" | head -n 1)
@@ -143,9 +152,7 @@ display_client_config() {
 # 1. 清理旧的、可能已损坏的环境
 if [ -d "$WORKDIR" ]; then
     echo "检测到旧目录，正在清理..."
-    # 停止可能还在运行的旧进程
-    pkill -f "$WORKDIR/wireguard-go"
-    pkill -f "$WORKDIR/cloudflared"
+    stop_services
     rm -rf "$WORKDIR"
 fi
 mkdir -p "$WORKDIR"
