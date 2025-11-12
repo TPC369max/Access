@@ -35,7 +35,6 @@ download_singbox() {
   local arch=$(get_arch)
   if [ ! -f "$WORKDIR/sing-box" ]; then
     echo "正在下载最新版 Sing-box..."
-    # 从官方 GitHub Releases 下载，确保是最新版本
     LATEST_VERSION=$(curl -s "https://api.github.com/repos/SagerNet/sing-box/releases/latest" | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
     if [ -z "$LATEST_VERSION" ]; then
         echo "错误: 无法获取 Sing-box 最新版本号，请检查网络。"
@@ -44,7 +43,6 @@ download_singbox() {
     echo "最新版本为: $LATEST_VERSION"
     URL="https://github.com/SagerNet/sing-box/releases/download/${LATEST_VERSION}/sing-box-${LATEST_VERSION#v}-linux-${arch}.tar.gz"
     
-    # 下载并直接解压到工作目录
     if command -v curl >/dev/null 2>&1; then
       curl -Ls "$URL" | tar -xz -C "$WORKDIR" --strip-components=1 "sing-box-${LATEST_VERSION#v}-linux-${arch}/sing-box"
     elif command -v wget >/dev/null 2>&1; then
@@ -56,7 +54,6 @@ download_singbox() {
     chmod +x "$WORKDIR/sing-box"
   fi
 }
-
 
 # 下载 Cloudflared
 download_cloudflared() {
@@ -77,13 +74,12 @@ download_cloudflared() {
 generate_config() {
   echo "正在生成 Sing-box 配置文件和 WireGuard 密钥..."
 
-  # 如果服务端的密钥不存在，则使用 sing-box 生成新的
-  if [ ! -f "$WORKDIR/server_private.key" ]; {
+  # *** 这里是修正的部分 ***
+  if [ ! -f "$WORKDIR/server_private.key" ]; then
     echo "生成新的服务端密钥对..."
     KEY_PAIR=$("$WORKDIR/sing-box" generate wireguard-keypair)
     echo "$KEY_PAIR" | grep "private_key" | awk -F '"' '{print $4}' > "$WORKDIR/server_private.key"
     echo "$KEY_PAIR" | grep "public_key" | awk -F '"' '{print $4}' > "$WORKDIR/server_public.key"
-  }
   fi
 
   SERVER_PRIVATE_KEY=$(cat "$WORKDIR/server_private.key")
@@ -146,8 +142,7 @@ run_services() {
   fi
 
   echo "正在启动 Cloudflared Argo 隧道..."
-  # 关键：使用 --url udp://localhost:PORT 来转发UDP流量
-  nohup "$WORKDIR/cloudflared" tunnel --no-autoupdate --edge-ip-version auto --protocol quic run --url udp://localhost:${WG_PORT} --token "${ARGO_AUTH}" > "$WORKDIR/argo.log" 2>&1 &
+  nohup "$WORKDIR/cloudflared" tunnel --no-autoupdate --edge-ip-version auto --protocol quic --url udp://localhost:${WG_PORT} --token "${ARGO_AUTH}" > "$WORKDIR/argo.log" 2>&1 &
   sleep 8
   if ! pgrep -f "$WORKDIR/cloudflared" > /dev/null; then
     echo "错误: cloudflared 启动失败。请检查日志: $WORKDIR/argo.log"
