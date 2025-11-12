@@ -25,7 +25,7 @@ get_arch() {
   echo "$cpu"
 }
 
-# 函数：下载二进制文件并进行验证（最终版：通过尝试执行来验证）
+# 函数：下载二进制文件并验证
 download_binary() {
   local url="$1"
   local out_path="$2"
@@ -38,29 +38,27 @@ download_binary() {
 
   echo "正在下载 ${binary_name}..."
   if command -v curl >/dev/null 2>&1; then
-    # 使用 -f 选项，如果服务器返回错误（如404），curl会直接失败
-    curl -Lf -o "$out_path" "$url"
+    if ! curl -Lf -o "$out_path" "$url"; then
+      echo "错误: 使用 curl 下载 ${binary_name} 失败！URL: ${url}"
+      exit 1
+    fi
   elif command -v wget >/dev/null 2>&1; then
-    wget -q -O "$out_path" "$url"
+    if ! wget -q -O "$out_path" "$url"; then
+      echo "错误: 使用 wget 下载 ${binary_name} 失败！URL: ${url}"
+      exit 1
+    fi
   else
     echo "错误: 系统中没有 curl 或 wget，无法下载所需工具。"
     exit 1
   fi
 
-  # --- 最终验证逻辑：尝试执行 --version ---
-  if [ -f "$out_path" ]; then
+  # 验证逻辑：检查文件大小是否大于0并且可执行
+  if [ -s "$out_path" ]; then
     chmod +x "$out_path"
-    # 尝试执行程序并检查其退出状态码。输出被重定向到/dev/null。
-    if "$out_path" --version >/dev/null 2>&1; then
-      echo "${binary_name} 下载并验证成功。"
-    else
-      echo "错误: ${binary_name} 下载成功但无法执行！"
-      echo "这可能是因为文件已损坏、架构不匹配，或下载链接已失效。"
-      rm -f "$out_path"
-      exit 1
-    fi
+    echo "${binary_name} 下载成功。"
   else
-    echo "错误: ${binary_name} 下载失败！请检查下载链接或网络连接。"
+    echo "错误: ${binary_name} 下载失败，文件为空或下载不完整。"
+    rm -f "$out_path"
     exit 1
   fi
 }
@@ -70,8 +68,10 @@ setup_tools() {
   local arch=$(get_arch)
   echo "检测到架构: $arch"
   download_binary "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch" "$WORKDIR/cloudflared"
-  # 注意：wireguard-go 和 wg 没有 --version 参数，我们只检查它们是否存在且可执行
-  download_binary "https://github.com/yonggekkk/argosbx/releases/download/argosbx/wireguard-go-linux-$arch" "$WORKDIR/wireguard-go"
+
+  # --- 已将 wireguard-go 的下载链接更换为备用源 ---
+  download_binary "https://github.com/ViRb3/wg-go/releases/download/v0.0.20220316/wireguard-go-linux-$arch" "$WORKDIR/wireguard-go"
+
   download_binary "https://github.com/yonggekkk/argosbx/releases/download/argosbx/wg-linux-$arch" "$WORKDIR/wg"
 }
 
@@ -100,7 +100,7 @@ stop_services() {
   echo "正在停止旧的服务进程..."
   pkill -f "$WORKDIR/wireguard-go"
   pkill -f "$WORKDIR/cloudflared"
-  sleep 2
+  sleep 1
 }
 
 # 运行服务
@@ -148,8 +148,6 @@ display_client_config() {
 }
 
 # --- 主程序执行流程 ---
-
-# 1. 清理旧的、可能已损坏的环境
 if [ -d "$WORKDIR" ]; then
     echo "检测到旧目录，正在清理..."
     stop_services
@@ -157,7 +155,6 @@ if [ -d "$WORKDIR" ]; then
 fi
 mkdir -p "$WORKDIR"
 
-# 2. 执行主要流程
 setup_tools
 generate_wireguard_config
 run_services
