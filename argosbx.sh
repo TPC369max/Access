@@ -36,28 +36,32 @@ download_binary() {
     return
   fi
 
-  echo "正在下载 ${binary_name}..."
+  echo "--> 正在从以下链接下载 ${binary_name}:"
+  echo "    ${url}"
+  
+  # 使用 curl 的 -fsSL 选项: f=失败时报错, s=静默, S=显示错误, L=跟随跳转
   if command -v curl >/dev/null 2>&1; then
-    if ! curl -Lf -o "$out_path" "$url"; then
-      echo "错误: 使用 curl 下载 ${binary_name} 失败！URL: ${url}"
+    if ! curl -fsSL -o "$out_path" "$url"; then
+      echo "!!! 错误: 使用 curl 下载 ${binary_name} 失败。"
+      echo "    请手动复制上面的链接到浏览器，检查它是否可以访问。"
       exit 1
     fi
   elif command -v wget >/dev/null 2>&1; then
     if ! wget -q -O "$out_path" "$url"; then
-      echo "错误: 使用 wget 下载 ${binary_name} 失败！URL: ${url}"
+      echo "!!! 错误: 使用 wget 下载 ${binary_name} 失败。"
       exit 1
     fi
   else
-    echo "错误: 系统中没有 curl 或 wget，无法下载所需工具。"
+    echo "错误: 系统中没有 curl 或 wget。"
     exit 1
   fi
 
-  # 验证逻辑：检查文件大小是否大于0并且可执行
+  # 验证下载的文件大小是否 > 0
   if [ -s "$out_path" ]; then
     chmod +x "$out_path"
     echo "${binary_name} 下载成功。"
   else
-    echo "错误: ${binary_name} 下载失败，文件为空或下载不完整。"
+    echo "!!! 错误: ${binary_name} 下载失败，文件为空或下载不完整。"
     rm -f "$out_path"
     exit 1
   fi
@@ -69,9 +73,10 @@ setup_tools() {
   echo "检测到架构: $arch"
   download_binary "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$arch" "$WORKDIR/cloudflared"
 
-  # --- 已将 wireguard-go 的下载链接更换为备用源 ---
-  download_binary "https://github.com/ViRb3/wg-go/releases/download/v0.0.20220316/wireguard-go-linux-$arch" "$WORKDIR/wireguard-go"
+  # --- [核心修改] 更换为 nekohasekai 维护的、更稳定的 wireguard-go 链接 ---
+  download_binary "https://github.com/nekohasekai/wireguard-go/releases/download/v0.0.20220316/wireguard-go-linux-$arch" "$WORKDIR/wireguard-go"
 
+  # wg 工具的链接目前仍然有效，暂时保留
   download_binary "https://github.com/yonggekkk/argosbx/releases/download/argosbx/wg-linux-$arch" "$WORKDIR/wg"
 }
 
