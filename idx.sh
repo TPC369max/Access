@@ -1,6 +1,3 @@
-rm -rf $HOME/idx.sh $HOME/agsbx && \
-curl -L -o $HOME/idx.sh https://raw.githubusercontent.com/TPC369max/Access/main/IDX.sh 2>/dev/null || \
-cat > $HOME/idx.sh << 'EOF' && chmod +x $HOME/idx.sh && ./idx.sh
 #!/bin/bash
 
 # --- 环境变量处理 ---
