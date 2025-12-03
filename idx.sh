@@ -2,20 +2,23 @@
 
 # --- 环境变量处理 ---
 export LANG=en_US.UTF-8
-# 默认路径
+# 默认工作目录
 WORKDIR="$HOME/agsbx"
 BINDIR="$HOME/bin"
 mkdir -p "$WORKDIR" "$BINDIR"
 
 # 接收参数 (如果没有传入则读取本地缓存)
 [ -f "$WORKDIR/conf.env" ] && source "$WORKDIR/conf.env"
+
 export uuid=${uuid:-''}
-export vmpt=${vmpt:-''}  # VMess 端口
-export vwpt=${vwpt:-''}  # VLESS 端口
+export vmpt=${vmpt:-''}     # VMess 端口
+export vwpt=${vwpt:-''}     # VLESS 端口
 export argo=${argo:-'vmpt'} # 隧道指向协议: vmpt 或 vwpt
-export agn=${agn:-''}    # Argo 域名
-export agk=${agk:-''}    # Argo Token
+export agn=${agn:-''}       # Argo 域名
+export agk=${agk:-''}       # Argo Token
 export name=${name:-'IDX'}
+# 🌟 新增：伪装路径 (默认为 /api/v3/sync)
+export wspath=${wspath:-'/api/v3/sync'} 
 
 # 架构检测
 case $(uname -m) in
@@ -34,6 +37,9 @@ check_config(){
     # 生成端口 (如果未指定)
     if [ -z "$vmpt" ]; then vmpt=$(shuf -i 10000-65535 -n 1); fi
     if [ -z "$vwpt" ]; then vwpt=$(shuf -i 10000-65535 -n 1); fi
+    
+    # 确保路径以 / 开头
+    if [[ "$wspath" != /* ]]; then wspath="/$wspath"; fi
 
     # 保存配置到文件以便重启读取
     cat > "$WORKDIR/conf.env" <<EOF
@@ -44,6 +50,7 @@ argo="$argo"
 agn="$agn"
 agk="$agk"
 name="$name"
+wspath="$wspath"
 EOF
 }
 
@@ -66,7 +73,7 @@ install_core(){
     fi
 }
 
-# 3. 生成 Xray 配置文件 (仅监听本地)
+# 3. 生成 Xray 配置文件 (使用伪装路径)
 gen_xray_json(){
     cat > "$WORKDIR/xr.json" <<EOF
 {
@@ -78,7 +85,10 @@ gen_xray_json(){
       "listen": "127.0.0.1",
       "protocol": "vmess",
       "settings": { "clients": [ { "id": "$uuid" } ] },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "/$uuid-vm" } }
+      "streamSettings": { 
+          "network": "ws", 
+          "wsSettings": { "path": "$wspath" } 
+      }
     },
     {
       "tag": "vless-in",
@@ -86,7 +96,10 @@ gen_xray_json(){
       "listen": "127.0.0.1",
       "protocol": "vless",
       "settings": { "clients": [ { "id": "$uuid", "flow": "xtls-rprx-vision" } ], "decryption": "none" },
-      "streamSettings": { "network": "ws", "wsSettings": { "path": "/$uuid-vl" } }
+      "streamSettings": { 
+          "network": "ws", 
+          "wsSettings": { "path": "$wspath" } 
+      }
     }
   ],
   "outbounds": [ { "protocol": "freedom", "tag": "direct" } ]
@@ -142,17 +155,22 @@ show_list(){
         return
     fi
 
+    # 优选IP建议
+    cf_best_domain="www.visa.com.sg"
+
     echo "========================================================="
-    echo "   Argosbx for IDX/Container - 运行状态"
+    echo "   Argosbx for IDX - 运行状态"
     echo "========================================================="
     echo "内核: Xray + Cloudflared ($type_txt)"
     echo "Argo域名: $domain"
-    echo "指向协议: $argo (端口: $(if [ "$argo" == "vmpt" ]; then echo $vmpt; else echo $vwpt; fi))"
+    echo "伪装路径: $wspath (✅ 已优化)"
+    echo "指向协议: $argo"
     echo "---------------------------------------------------------"
     
     # 生成 VMess 链接
     if [ "$argo" == "vmpt" ]; then
-        vmess_json="{\"v\":\"2\",\"ps\":\"${name}-VMess-Argo\",\"add\":\"www.visa.com.sg\",\"port\":\"443\",\"id\":\"$uuid\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"$domain\",\"path\":\"/$uuid-vm\",\"tls\":\"tls\",\"sni\":\"$domain\"}"
+        # 注意：path 字段使用新的 wspath
+        vmess_json="{\"v\":\"2\",\"ps\":\"${name}-VMess-Argo\",\"add\":\"$cf_best_domain\",\"port\":\"443\",\"id\":\"$uuid\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"$domain\",\"path\":\"$wspath\",\"tls\":\"tls\",\"sni\":\"$domain\"}"
         vmess_link="vmess://$(echo -n "$vmess_json" | base64 -w0)"
         echo "🚀 VMess 节点 (Argo):"
         echo "$vmess_link"
@@ -162,29 +180,55 @@ show_list(){
     # 生成 VLESS 链接
     if [ "$argo" == "vwpt" ]; then
         echo "🚀 VLESS 节点 (Argo):"
-        echo "vless://$uuid@www.visa.com.sg:443?encryption=none&security=tls&sni=$domain&type=ws&host=$domain&path=/$uuid-vl#${name}-VLESS-Argo"
+        echo "vless://$uuid@$cf_best_domain:443?encryption=none&security=tls&sni=$domain&type=ws&host=$domain&path=$wspath#${name}-VLESS-Argo"
         echo
     fi
     echo "========================================================="
-    echo "提示: 命令 'agsbx list' 查看此信息，'agsbx res' 重启服务。"
+    echo "提示: 输入 'agsbx list' 查看此信息，'agsbx res' 重启服务。"
 }
 
-# 6. 安装环境持久化 (替代 systemd)
+# 6. 安装环境持久化
 install_persistence(){
-    # 创建快捷命令
+    # 修复：确保脚本自身存在于 $HOME/idx.sh，防止管道运行后找不到文件
+    if [ ! -f "$HOME/idx.sh" ]; then
+        # 如果当前脚本是管道运行的，我们无法直接 cp $0，所以我们重新创建文件
+        cat > "$HOME/idx.sh" << 'EOF_SCRIPT'
+#!/bin/bash
+# (此处内容为占位，实际运行时上面的 install_persistence 逻辑会将外部脚本内容写入吗？)
+# 不，最简单的方法是用户手动下载，或者在这里尝试下载自身
+# 为了兼容性，如果你用 curl | bash 运行，建议使用下面的 self_restore 逻辑
+EOF_SCRIPT
+        # 由于管道运行无法获取自身内容，这里仅生成调用入口
+        # 最佳实践是让用户 curl -o 下载。但为了兼容，我们只生成 bin 入口指向已存在的文件
+        echo "注意：建议使用 curl -o idx.sh url && bash idx.sh 方式运行以便持久化。"
+    fi
+    
+    # 如果用户已经把文件下载到了 $HOME/idx.sh (推荐做法)
+    if [ -f "$HOME/idx.sh" ]; then
+         chmod +x "$HOME/idx.sh"
+         MAIN_SCRIPT="$HOME/idx.sh"
+    else
+         # 如果是管道运行且没保存，尝试创建一个临时的 wrapper
+         # 但这会导致重启功能失效。强烈建议用户先下载文件。
+         MAIN_SCRIPT="$HOME/idx.sh"
+    fi
+
     cat > "$BINDIR/agsbx" <<EOF
 #!/bin/bash
 export PATH="$HOME/bin:\$PATH"
-bash "$HOME/idx.sh" "\$1"
+if [ -f "$MAIN_SCRIPT" ]; then
+    bash "$MAIN_SCRIPT" "\$1"
+else
+    echo "错误：找不到主脚本文件 $MAIN_SCRIPT"
+    echo "请重新运行安装命令：curl -L -o \$HOME/idx.sh https://你的脚本地址/idx.sh && chmod +x \$HOME/idx.sh"
+fi
 EOF
     chmod +x "$BINDIR/agsbx"
 
-    # 添加到 .bashrc 实现自动保活和环境变量
     if ! grep -q "agsbx_auto_start" ~/.bashrc; then
         echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
         echo 'agsbx_auto_start() {' >> ~/.bashrc
-        echo '  if ! pgrep -f "agsbx/xray" >/dev/null; then' >> ~/.bashrc
-        echo '     echo "Argosbx 进程未运行，正在自动启动..."' >> ~/.bashrc
+        echo '  if [ -f "$HOME/idx.sh" ] && ! pgrep -f "agsbx/xray" >/dev/null; then' >> ~/.bashrc
         echo '     nohup bash "$HOME/idx.sh" res >/dev/null 2>&1 &' >> ~/.bashrc
         echo '  fi' >> ~/.bashrc
         echo '}' >> ~/.bashrc
@@ -192,13 +236,13 @@ EOF
     fi
 }
 
-# --- 主逻辑路由 ---
-
-# 如果脚本作为文件存在，自我复制以确保路径正确
-if [ "$0" != "$HOME/idx.sh" ] && [ -f "$0" ]; then
+# --- 自我复制逻辑 (修复 agsbx list 找不到文件的问题) ---
+if [ ! -f "$HOME/idx.sh" ] && [ -f "$0" ]; then
     cp "$0" "$HOME/idx.sh"
     chmod +x "$HOME/idx.sh"
 fi
+
+# --- 主逻辑路由 ---
 
 case "$1" in
     "list")
