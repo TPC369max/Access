@@ -1,42 +1,44 @@
 # 1. 清理旧文件
-rm -rf $HOME/idx.sh $HOME/agsbx
+rm -rf $HOME/idx.sh $HOME/bin/agsbx $HOME/agsbx/xr.json
 
-# 2. 写入修复版脚本 (VLESS-WS 版)
+# 2. 写入 VLESS-WS 稳定伪装版脚本
 cat > $HOME/idx.sh << 'SCRIPT_EOF'
 #!/bin/bash
 
-# --- 环境变量处理 ---
+# --- 环境变量与默认设置 ---
 export LANG=en_US.UTF-8
 WORKDIR="$HOME/agsbx"
 BINDIR="$HOME/bin"
 mkdir -p "$WORKDIR" "$BINDIR"
 
+# 读取配置
 [ -f "$WORKDIR/conf.env" ] && source "$WORKDIR/conf.env"
 
 # 参数定义
 export uuid=${uuid:-''}
-export vmpt=${vmpt:-''}     
-export vwpt=${vwpt:-''}     
-# 默认优先使用 VLESS (vwpt)
+export vmpt=${vmpt:-''}     # VMess 端口
+export vwpt=${vwpt:-''}     # VLESS 端口
+# 默认使用 VLESS (vwpt)
 export argo=${argo:-'vwpt'} 
-export agn=${agn:-''}       
-export agk=${agk:-''}       
+export agn=${agn:-''}       # 固定域名
+export agk=${agk:-''}       # 固定 Token
 export name=${name:-'IDX'}
 
-# --- 高度伪装路径 (Websocket) ---
-# 模拟普通的文件下载或API流
-export vm_path="/api/v3/video-stream"    
-export vl_path="/api/v3/download/assets" 
+# --- 深度伪装路径 (修改处) ---
+# 模拟系统更新接口，看起来更像正常流量
+export vl_path="/api/v4/system/updates"
+export vm_path="/api/v3/video-stream"
 
-# 架构检测
+# --- 架构检测 ---
 case $(uname -m) in
     aarch64) cpu=arm64;;
     x86_64) cpu=amd64;;
-    *) echo "错误: 不支持的架构" && exit 1;;
+    *) echo "错误: 不支持的CPU架构" && exit 1;;
 esac
 
-# --- 功能模块 ---
+# --- 功能函数 ---
 
+# 1. 初始化配置
 check_config(){
     if [ -z "$uuid" ]; then uuid=$(cat /proc/sys/kernel/random/uuid); fi
     if [ -z "$vmpt" ]; then vmpt=$(shuf -i 10000-65535 -n 1); fi
@@ -50,11 +52,12 @@ argo="$argo"
 agn="$agn"
 agk="$agk"
 name="$name"
-vm_path="$vm_path"
 vl_path="$vl_path"
+vm_path="$vm_path"
 EOF
 }
 
+# 2. 下载内核
 install_core(){
     if [ ! -f "$WORKDIR/xray" ]; then
         echo "正在下载 Xray..."
@@ -62,6 +65,7 @@ install_core(){
         wget -qO "$WORKDIR/xray" "$url" || curl -Lso "$WORKDIR/xray" "$url"
         chmod +x "$WORKDIR/xray"
     fi
+
     if [ ! -f "$WORKDIR/cloudflared" ]; then
         echo "正在下载 Cloudflared..."
         url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$cpu"
@@ -70,6 +74,7 @@ install_core(){
     fi
 }
 
+# 3. 生成 Xray 配置 (VLESS-WS)
 gen_xray_json(){
     cat > "$WORKDIR/xr.json" <<EOF
 {
@@ -81,10 +86,7 @@ gen_xray_json(){
       "listen": "127.0.0.1",
       "protocol": "vmess",
       "settings": { "clients": [ { "id": "$uuid" } ] },
-      "streamSettings": { 
-        "network": "ws", 
-        "wsSettings": { "path": "$vm_path" } 
-      }
+      "streamSettings": { "network": "ws", "wsSettings": { "path": "$vm_path" } }
     },
     {
       "tag": "vless-in",
@@ -92,12 +94,17 @@ gen_xray_json(){
       "listen": "127.0.0.1",
       "protocol": "vless",
       "settings": { 
-        "clients": [ { "id": "$uuid", "flow": "xtls-rprx-vision" } ], 
+        "clients": [ { "id": "$uuid" } ], 
         "decryption": "none" 
       },
       "streamSettings": { 
         "network": "ws", 
-        "wsSettings": { "path": "$vl_path" } 
+        "wsSettings": { 
+            "path": "$vl_path",
+            "headers": {
+                "Host": ""
+            }
+        } 
       }
     }
   ],
@@ -106,6 +113,7 @@ gen_xray_json(){
 EOF
 }
 
+# 4. 启动进程
 start_process(){
     pkill -f "$WORKDIR/xray"
     pkill -f "$WORKDIR/cloudflared"
@@ -115,19 +123,20 @@ start_process(){
     if [ "$argo" == "vmpt" ]; then target_port=$vmpt; else target_port=$vwpt; fi
     
     rm -f "$WORKDIR/argo.log"
-    # 标准 http2 协议，完美支持 WS
+    # 使用 http2 协议连接 Argo 边缘，但内部流量是 WS
     ARGS="tunnel --no-autoupdate --edge-ip-version auto --protocol http2"
     
     if [ -n "$agn" ] && [ -n "$agk" ]; then
         nohup "$WORKDIR/cloudflared" $ARGS run --token "$agk" >/dev/null 2>&1 &
-        echo "启动 Argo 固定隧道 ($agn)..."
+        echo "正在启动 Argo 固定隧道 ($agn)..."
     else
         nohup "$WORKDIR/cloudflared" $ARGS --url http://localhost:$target_port > "$WORKDIR/argo.log" 2>&1 &
-        echo "启动 Argo 临时隧道，获取域名中..."
+        echo "正在启动 Argo 临时隧道，获取域名中..."
         sleep 5
     fi
 }
 
+# 5. IP信息
 check_ip_info(){
     echo
     echo "========= 服务器 IP 信息 ========="
@@ -143,6 +152,7 @@ check_ip_info(){
     echo "=================================="
 }
 
+# 6. 显示列表
 show_list(){
     source "$WORKDIR/conf.env" 2>/dev/null
     check_ip_info
@@ -160,43 +170,41 @@ show_list(){
     fi
 
     if [ -z "$domain" ]; then
-        echo "❌ 无法获取 Argo 域名，请稍后重试。"
+        echo "❌ 错误: Argo 域名获取失败，请重试。"
         return
     fi
 
-    echo "协议: Xray + Cloudflared ($type_txt)"
-    echo "域名: $domain"
+    echo "状态: Xray (WS模式) | Argo: $domain"
     echo "---------------------------------------------------------"
 
+    # VLESS-WS (稳定推荐)
     if [ "$argo" == "vwpt" ]; then
-        echo "✅ [稳定] VLESS-WS 节点 (伪装路径):"
-        echo "Path: $vl_path"
-        # 构造 VLESS-WS 链接 (去掉流控参数，因为过CDN/Tunnel时Vision流控不生效且会导致问题)
+        echo "✅ [推荐] VLESS-WS 节点 (伪装路径: $vl_path):"
+        # 构造标准 VLESS 链接
         echo "vless://${uuid}@www.visa.com.sg:443?encryption=none&security=tls&sni=${domain}&type=ws&host=${domain}&path=${vl_path}#${name}-VLESS-WS"
         echo
     fi
 
+    # VMess-WS
     if [ "$argo" == "vmpt" ]; then
         echo "✅ VMess-WS 节点:"
         vjson="{\"v\":\"2\",\"ps\":\"${name}-VMess-WS\",\"add\":\"www.visa.com.sg\",\"port\":\"443\",\"id\":\"${uuid}\",\"aid\":\"0\",\"scy\":\"auto\",\"net\":\"ws\",\"type\":\"none\",\"host\":\"${domain}\",\"path\":\"${vm_path}\",\"tls\":\"tls\",\"sni\":\"${domain}\"}"
-        echo "vmess://$(echo -n "$vjson" | base64 -w0)"
+        vlink="vmess://$(echo -n "$vjson" | base64 -w0)"
+        echo "$vlink"
         echo
     fi
-    
     echo "========================================================="
-    echo "提示: 当前指向端口为 [$argo]。如连不上请检查域名是否被墙。"
 }
 
+# 7. 持久化
 install_persistence(){
-    cp "$0" "$HOME/idx.sh"
-    chmod +x "$HOME/idx.sh"
+    cp "$0" "$HOME/idx.sh" && chmod +x "$HOME/idx.sh"
     cat > "$BINDIR/agsbx" <<EOF
 #!/bin/bash
 export PATH="$HOME/bin:\$PATH"
 bash "$HOME/idx.sh" "\$1"
 EOF
     chmod +x "$BINDIR/agsbx"
-
     if ! grep -q "agsbx_auto_start" ~/.bashrc; then
         echo 'export PATH="$HOME/bin:$PATH"' >> ~/.bashrc
         echo 'agsbx_auto_start() {' >> ~/.bashrc
@@ -210,9 +218,15 @@ EOF
 
 case "$1" in
     "list") show_list ;;
-    "res") echo "重启中..."; check_config; gen_xray_json; start_process; sleep 2; echo "完成"; show_list ;;
-    "del") pkill -f "$WORKDIR/xray"; pkill -f "$WORKDIR/cloudflared"; rm -rf "$WORKDIR" "$HOME/idx.sh" "$BINDIR/agsbx"; sed -i '/agsbx/d' ~/.bashrc; echo "已卸载" ;;
-    *) check_config; install_core; gen_xray_json; start_process; install_persistence; sleep 3; show_list ;;
+    "res") 
+        echo "重启服务..."
+        check_config; gen_xray_json; start_process; sleep 2; echo "完成"; show_list ;;
+    "del") 
+        pkill -f "$WORKDIR/xray"; pkill -f "$WORKDIR/cloudflared"
+        rm -rf "$WORKDIR" "$HOME/idx.sh" "$BINDIR/agsbx"
+        sed -i '/agsbx/d' ~/.bashrc; echo "卸载完成。" ;;
+    *) 
+        check_config; install_core; gen_xray_json; start_process; install_persistence; sleep 3; show_list ;;
 esac
 SCRIPT_EOF
 
