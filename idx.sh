@@ -8,10 +8,10 @@
 pkill -9 -f "$HOME/agsbx/xray" 2>/dev/null
 pkill -9 -f "$HOME/agsbx/cloudflared" 2>/dev/null
 
-# 2. 清理旧内核与日志，确保拉取最新版 Cloudflared
+# 2. 清理旧核心文件，确保强制拉取最新版 Cloudflared
 rm -rf "$HOME/idx.sh" "$HOME/bin/agsbx" "$HOME/agsbx/cloudflared" "$HOME/agsbx/xr.json" "$HOME/agsbx/argo.log"
 
-# 3. 写入最新主程序
+# 3. 写入核心主程序
 cat > "$HOME/idx.sh" << 'SCRIPT_EOF'
 #!/bin/bash
 
@@ -27,7 +27,6 @@ case "$(uname -m)" in
     *) echo "❌ 错误: 不支持的 CPU 架构: $(uname -m)" && exit 1 ;;
 esac
 
-# 辅助生成函数
 get_uuid() {
     if [ -f /proc/sys/kernel/random/uuid ]; then
         cat /proc/sys/kernel/random/uuid
@@ -46,7 +45,7 @@ get_port() {
     fi
 }
 
-# 参数配置与合并（命令行传入的参数优先于 conf.env）
+# 命令行传入参数优先于 conf.env
 _IN_UUID="$uuid"
 _IN_VMPT="$vmpt"
 _IN_VWPT="$vwpt"
@@ -245,6 +244,7 @@ show_list() {
     echo "========================================================="
 }
 
+# 深度改良的持久化配置：既找回了原版的稳定与函数命名，又彻底杜绝了语法错误
 install_persistence() {
     cat > "$BINDIR/agsbx" << 'EOF'
 #!/bin/bash
@@ -253,18 +253,38 @@ bash "$HOME/idx.sh" "$@"
 EOF
     chmod +x "$BINDIR/agsbx"
 
-    # 使用单行标签注入，避免多行删除导致 bashrc 语法报错
+    # 清理所有历史旧标记，确保纯净
+    sed -i '/# >>> agsbx-autostart >>>/,/# <<< agsbx-autostart <<</d' ~/.bashrc
     sed -i '/agsbx-autostart-hook/d' ~/.bashrc
-    echo 'export PATH="$HOME/bin:$PATH" # agsbx-autostart-hook' >> ~/.bashrc
-    echo 'pgrep -f "agsbx/xray" >/dev/null 2>&1 || nohup bash "$HOME/idx.sh" res >/dev/null 2>&1 & # agsbx-autostart-hook' >> ~/.bashrc
+    sed -i '/agsbx_auto_start/d' ~/.bashrc
+    sed -i '/idx\.sh.*res/d' ~/.bashrc
+
+    # 写入全新的智能自愈守护块
+    cat >> ~/.bashrc << 'EOF'
+# >>> agsbx-autostart >>>
+export PATH="$HOME/bin:$PATH"
+agsbx_auto_start() {
+  # 1. 防并发防打架：若已有启动进程在执行中，则直接跳过
+  if ! pgrep -f "idx.sh" >/dev/null 2>&1; then
+    # 2. 双进程健康检测：Xray 或 Cloudflared 任一没有运行，就静默拉起
+    if ! pgrep -f "agsbx/xray" >/dev/null 2>&1 || ! pgrep -f "agsbx/cloudflared" >/dev/null 2>&1; then
+      (nohup bash "$HOME/idx.sh" silent >/dev/null 2>&1 &) 2>/dev/null
+    fi
+  fi
+}
+agsbx_auto_start
+# <<< agsbx-autostart <<<
+EOF
 }
 
 uninstall() {
     echo "正在彻底卸载服务..."
     stop_process
     rm -rf "$WORKDIR" "$HOME/idx.sh" "$BINDIR/agsbx"
-    sed -i '/agsbx-autostart-hook/d' ~/.bashrc
+    # 成对块级删除，100% 杜绝多行 fi 语法崩溃
+    sed -i '/# >>> agsbx-autostart >>>/,/# <<< agsbx-autostart <<</d' ~/.bashrc
     sed -i '/agsbx/d' ~/.bashrc
+    sed -i '/idx\.sh/d' ~/.bashrc
     echo "✅ 卸载与清理完成。"
 }
 
@@ -274,6 +294,9 @@ case "$1" in
     "res")
         echo "重启服务..."
         check_config; gen_xray_json; start_process; sleep 2; echo "完成"; show_list ;;
+    "silent")
+        # 专为终端打开时的静默自愈设计：快速拉起，不打印任何字符，不拖慢终端响应
+        check_config; [ -f "$WORKDIR/xr.json" ] || gen_xray_json; start_process ;;
     "up"|"update")
         echo "正在强制升级内核..."
         check_config; install_core "1"; gen_xray_json; start_process; sleep 2; echo "升级完毕"; show_list ;;
